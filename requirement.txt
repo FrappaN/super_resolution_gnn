@@ -1,0 +1,15 @@
+matplotlib
+networkx 
+numpy 
+pandas
+pyg-lib==0.4.0
+scikit-learn
+scipy 
+seaborn 
+torch==2.2.0
+torch-cluster 
+torch-scatter 
+torch-sparse 
+torch_geometric==2.6.1
+tqdm 
+datacommons-pandas
