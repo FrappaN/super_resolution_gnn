@@ -148,36 +148,19 @@ class GNNPredictor(torch.nn.Module):
         self.lin_out = torch.nn.Linear(hidden_channels, hidden_channels)
         self.decoder = torch.nn.Linear(hidden_channels, num_classes)
 
-    def forward(self, x: Tensor, edge_index: Tensor, bg_subgraph: Tensor, me_subgraph: Tensor = None, **kwargs) -> Tensor:
+    def forward(self, x: Tensor, edge_index: Tensor, subgraphs: Tensor = None, **kwargs) -> Tensor:
         # Classification after first pooling layer only
         if hasattr(self, 'node_emb'):
             x = self.node_emb(x)
         x = (self.conv1(x, edge_index)).relu()
         x = self.conv2(x, edge_index).relu()
-        
-        
-        # First pooling using bg_subgraph
-        x = tgnn.global_mean_pool(x, bg_subgraph)
-        x = self.lin_out(x).relu()
-        # Second pooling using me_subgraph
-        
-        if self.super_res and me_subgraph is not None:
-            x = tgnn.global_mean_pool(x, me_subgraph)
-        
         x = self.decoder(x)
-        return x
-    
-    def forward_bg(self, x: Tensor, edge_index: Tensor, bg_subgraph: Tensor, **kwargs) -> Tensor:
-        # Classification after first pooling layer only
-        if hasattr(self, 'node_emb'):
-            x = self.node_emb(x)
-        x = (self.conv1(x, edge_index)).relu()
-        x = self.conv2(x, edge_index).relu()
         
-        # First pooling using bg_subgraph
-        x = tgnn.global_mean_pool(x, bg_subgraph)
-        x = self.lin_out(x).relu()
-        x = self.decoder(x)
+        if subgraphs is not None:
+            # First pooling using bg_subgraph
+            x = tgnn.global_mean_pool(x, subgraphs)
+            #x = self.lin_out(x).relu()
+
         return x
 
 
@@ -348,85 +331,6 @@ class GatModel(AbstractRepModel):
         }
         return x_dict
 
-
-
-
-# class HeteroSpatialGNN(torch.nn.Module):
-#     def __init__(self, hidden_channels):
-#         super().__init__()
-#         self.conv1 = HeteroConv({
-#                 ('user', 'rates', 'business'): SpatialGraphConv(coors=3, in_channels=hidden_channels, out_channels=hidden_channels, hidden_size=8),
-#                 ('business', 'rev_rates', 'user'): SpatialGraphConv(coors=3, in_channels=hidden_channels, out_channels=hidden_channels, hidden_size=8),
-#             }, aggr='sum')
-#         self.conv2 = HeteroConv({
-#                 ('user', 'rates', 'business'): SpatialGraphConv(coors=3, in_channels=hidden_channels, out_channels=hidden_channels, hidden_size=hidden_channels),
-#                 ('business', 'rev_rates', 'user'): SpatialGraphConv(coors=3, in_channels=hidden_channels, out_channels=hidden_channels, hidden_size=hidden_channels),
-#             }, aggr='sum')
-#         return
-
-#     def forward(self, x_dict: Tensor, edge_index_dict: Tensor, pos_dict: Tensor) -> Tensor:
-#         # Define a 2-layer GNN computation graph.
-#         # Use a *single* `ReLU` non-linearity in-between.
-
-#         x_dict = self.conv1(x_dict, edge_index_dict, pos_dict)
-#         x_dict = {key: x.relu() for key, x in x_dict.items()}
-        
-#         x_dict = self.conv2(x_dict, edge_index_dict, pos_dict)
-#         #print(x_dict)
-#         return x_dict
-
-
-# class SpatialModel(AbstractRepModel):
-#     def __init__(self, in_features, hidden_channels, num_users, num_business, mode='normal'):
-#         super().__init__()
-
-#         self.bus_lin = torch.nn.Linear(in_features, hidden_channels)
-#         self.user_emb = torch.nn.Embedding(num_users, hidden_channels)
-
-#         # Embedding user positions too
-#         self.user_pos_emb = torch.nn.Embedding(num_users, 3)
- 
-#         # Instantiate GNN:
-#         self.encoder = HeteroSpatialGNN(hidden_channels)
-
-#         return
-
-#     def feat_encoder(self, data: HeteroData) -> Tensor:
-#         x_dict = {
-#           "user": self.user_emb(data["user"].node_id),
-#           "business": self.bus_lin(data["business"].x),
-#         }
-#         pos_dict = {
-#             "user": self.user_pos_emb(data["user"].node_id),
-#             "business": data["business"].pos,
-#         }
-
-#         return x_dict, pos_dict
-
-#     def forward(self, data: HeteroData) -> Tensor:
-
-#         x_dict, pos_dict = self.feat_encoder(data)
-
-#         x_dict = self.encoder(x_dict, data.edge_index_dict, pos_dict=pos_dict)
-
-#         pred = self.decoder(
-#             x_dict["user"],
-#             x_dict["business"],
-#             data["user", "rates", "business"].edge_label_index,
-#         )
-#         return pred
-    
-#     def forward_test(self, data: HeteroData) -> Tensor:
-
-#         x_dict, pos_dict = self.feat_encoder(data)
-
-#         x_dict = self.encoder(x_dict, data.edge_index_dict, pos_dict=pos_dict)
-
-#         pred = self.decoder(
-#             x_dict["user"],
-#             x_dict["business"],
-#         )
-#         return pred
 
     
 

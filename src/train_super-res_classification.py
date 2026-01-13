@@ -26,30 +26,6 @@ import torch
 
 from sklearn.metrics import roc_curve
 
-def get_optimal_thresholds(y_true, y_probs, n_classes):
-    """
-    Finds the best threshold for each class in a multiclass problem.
-    y_true: Ground truth labels (0 to N-1)
-    y_probs: Predicted probabilities (shape: n_samples, n_classes)
-    """
-    best_thresholds = []
-    
-    for i in range(n_classes):
-        # Create binary labels for the current class
-        y_binary = (y_true == i).astype(int)
-        # Extract probabilities for the current class
-        y_score = y_probs[:, i]
-        
-        # Calculate ROC curve
-        fpr, tpr, thresholds = roc_curve(y_binary, y_score)
-        
-        # Calculate Youden's J statistic: J = tpr – fpr
-        # The index of the maximum J gives the optimal threshold
-        idx = np.argmax(tpr - fpr)
-        best_thresholds.append(thresholds[idx])
-        
-    return best_thresholds
-
 
 def create_spatial_graph(state_buss, buss_out_embs, macroentity, k=10, device='cpu'):
     latitudes = torch.tensor(state_buss.latitude.values, dtype=torch.float).view(-1, 1)
@@ -98,33 +74,24 @@ def create_spatial_graph(state_buss, buss_out_embs, macroentity, k=10, device='c
     data = Data(
         x=buss_out_embs, 
         edge_index=edge_index, 
-        train_y=train_labels, 
+        train_y=train_y, 
         test_y=test_labels, 
         train_to_test_y=train_to_test_labels, 
-        me_subgraph=blockgroup_to_macroentity_tensor, 
+        me_subgraph=macroentity_ids, 
         bg_subgraph=block_group_ids
         ).to(device)
     return data
 
-def classify_predictions(true_y, continuous_pred_y, n_quantiles):
-    """
-    Classify the continuous predictions by first finding the best threshold for each class and then classifying accordingly.
-    """
-    # Get the optimal thresholds for each class
-    thresholds = get_optimal_thresholds(true_y, continuous_pred_y, n_quantiles)
+def loss_entropy_within_macroentity(buss_out, macroentity_ids):
+    # loss that forces the buss_out of businesses in the same macroentity to be similar
+    # for each macroentity, compute the entropy of the buss_out
+    probs = torch.softmax(buss_out, dim=1)
+    entropies = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
+    loss = 0.0
+    me_entropies = scatter(entropies, macroentity_ids, dim=0, reduce='sum')
+    loss = torch.mean(me_entropies)
 
-    rescaled_pred_y = np.zeros_like(continuous_pred_y)
-    if n_quantiles == 1:
-        preds = (continuous_pred_y[:, 1] >= thresholds[1]).astype(int)
-    else:
-        for i in range(n_quantiles):
-            rescaled_pred_y[:, i] = continuous_pred_y[:, i] / thresholds[i]
-
-        # Classify based on the thresholds
-        preds = np.argmax(rescaled_pred_y, axis=1)
-
-    return preds
-
+    return loss
 
 def main(
     n_quantiles=5,
@@ -260,7 +227,7 @@ def main(
                     curr_results = {}
                     # split train and validation
                     num_me_ids = len(curr_buss_df[f'{macroentity}_id'].unique())
-                    assert num_me_ids == len(graph_data.train_y)
+                    #assert num_me_ids == len(graph_data.train_y)
 
                     for trial in range(num_trials):
 
@@ -295,14 +262,16 @@ def main(
                         for epoch in (range(1, epochs + 1)):
                             model.train()
                             optimizer.zero_grad()
-                            out = model(graph_data.x, graph_data.edge_index, graph_data.bg_subgraph, graph_data.me_subgraph)
+                            out = model(graph_data.x, graph_data.edge_index)
 
                             loss = criterion(out[train_idx], graph_data.train_y[train_idx])
+
+
                             loss.backward()
                             optimizer.step()
 
                             model.eval()
-                            out = model(graph_data.x, graph_data.edge_index, graph_data.bg_subgraph, graph_data.me_subgraph)
+                            out = model(graph_data.x, graph_data.edge_index)
                             val_loss = criterion(out[val_idx], graph_data.train_y[val_idx])
                             if val_loss < best_loss:
                                 best_loss = val_loss
@@ -316,8 +285,8 @@ def main(
 
                         model.eval()
 
-                        pred_y_on_train =  model(graph_data.x, graph_data.edge_index, graph_data.bg_subgraph, graph_data.me_subgraph).softmax(dim=1).detach().cpu().numpy()
-                        pred_y_on_test = model.forward_bg(graph_data.x, graph_data.edge_index, graph_data.bg_subgraph).softmax(dim=1).detach().cpu().numpy()
+                        pred_y_on_train =  model(graph_data.x, graph_data.edge_index).softmax(dim=1).detach().cpu().numpy()
+                        pred_y_on_test = model(graph_data.x, graph_data.edge_index, graph_data.bg_subgraph).softmax(dim=1).detach().cpu().numpy()
                         val_y = graph_data.train_y[val_idx].cpu().detach().numpy()
                         train_y = graph_data.train_y[train_idx].cpu().detach().numpy()
 
@@ -333,14 +302,14 @@ def main(
 
                         train_y = graph_data.train_to_test_y.cpu().detach().numpy()
                         test_y = graph_data.test_y.cpu().detach().numpy()
-                        cont_train_y = curr_buss_df.groupby('block_group_id')['ranking_train'].mean().values
+                        #cont_train_y = curr_buss_df.groupby('block_group_id')['ranking_train'].mean().values
 
                         # concatenate n_quantiles times train_y (horizzontaly)
-                        discrete_pred_y = pred_y_on_test.argmax(axis=1) #classify_predictions(test_y, pred_y_on_test, n_quantiles)
+                        discrete_pred_y = pred_y_on_test.argmax(axis=1) 
 
                         train_to_test_score = f1_score(test_y, train_y, average='micro')
                         if n_quantiles == 2:
-                            train_to_test_auc = roc_auc_score(test_y, cont_train_y)
+                            train_to_test_auc = roc_auc_score(test_y, train_y)
                         else:
                             one_hot_train_y = np.zeros((len(test_y), n_quantiles))
                             for i in range(n_quantiles):
@@ -352,6 +321,11 @@ def main(
                             test_auc = roc_auc_score(test_y, pred_y_on_test[:, 1])
                         else:
                             test_auc = roc_auc_score(test_y, pred_y_on_test, multi_class='ovr')
+
+                        # for the first trial, save the model
+                        if trial == 0 and model_embs == 'LightGCN' and urbe == 'Philadelphia':
+                            torch.save(model.state_dict(), f'{models_dir}super_res_classification__{model_embs}__{urbe}__{dem_var_name}__{macroentity}__nquantiles{n_quantiles}__model.pth')
+
 
                         curr_results['urban_area'] = urbe
                         curr_results['target_variable'] = dem_var_names[dem_var_name]
@@ -388,12 +362,11 @@ if __name__ == "__main__":
     parser.add_argument("--business_csv_path", type=str, default='../datasets/yelp2019_business.csv')
     parser.add_argument("--models_dir", type=str, default='../results/yelp2019/')
     parser.add_argument("--results_path", type=str, default='../results/yelp2019/')
-    parser.add_argument("--results_csv", type=str, default='/super_resolution_GNN_classification_results.csv')
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=5000)
     parser.add_argument("--patience", type=int, default=100)
     parser.add_argument("--k", type=int, default=10)
-    parser.add_argument("--hidden_channels", type=int, default=32)
+    parser.add_argument("--hidden_channels", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--weight_decay", type=float, default=5e-4)
 
@@ -401,7 +374,7 @@ if __name__ == "__main__":
     ua = args.urban_areas.split(",") if args.urban_areas else None
     me = args.macroentities.split(",") if args.macroentities else None
 
-    results_csv_path = args.results_path + args.results_csv
+    results_csv_path = args.results_path + 'super_resolution_GNN_classification_' + str(args.n_quantiles) + 'quantiles.csv' 
 
     main(
         n_quantiles=args.n_quantiles,

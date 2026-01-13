@@ -42,34 +42,17 @@ def create_spatial_graph(state_buss, buss_out_embs, k=10, device='cpu'):
     _, entity_ids = np.unique(entity_ids, return_inverse=True)
     entity_ids = torch.tensor(entity_ids, dtype=torch.long)
 
-    y = scatter(y, entity_ids, dim=0, reduce='mean').long()
+    test_labels = scatter(y, entity_ids, dim=0, reduce='mean').long()
 
-    data = Data(x=buss_out_embs, edge_index=edge_index, y=y, entity_ids=entity_ids).to(device)
+    data = Data(x=buss_out_embs, edge_index=edge_index, y=y, test_y=test_labels,entity_ids=entity_ids).to(device)
 
     return data
     
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Interpolation classification over spatial graph with macroentity aggregation")
-    parser.add_argument("--n_quantiles", type=int, default=5)
-    parser.add_argument('--urban_areas', type=str, default='Philadelphia,St. Louis,Indianapolis,Nashville,Tampa', help='Comma-separated urban areas to include')
-    parser.add_argument('--macroentities', type=str, default='bg,tract,zip', help='Comma-separated target entities (bg, tract, zip)')
-    parser.add_argument('--business_csv_path', type=str, default='../datasets/yelp2019_business.csv', help='Path to businesses CSV')
-    parser.add_argument('--models_dir', type=str, default='../results/yelp2019/', help='Directory containing precomputed business embeddings (*.npy)')
-    parser.add_argument('--results_csv', type=str, default='../results/yelp2019/interpolation_GNN_results_classification.csv', help='Output CSV path for results')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--epochs', type=int, default=5000, help='Max training epochs')
-    parser.add_argument('--patience', type=int, default=100, help='Early stopping patience')
-    parser.add_argument('--k', type=int, default=10, help='k for kNN spatial graph')
-    parser.add_argument('--hidden_channels', type=int, default=32, help='Hidden channels for GNN')
-    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=5e-4, help='Weight decay')
-    parser.add_argument('--dem_vars', type=str, default='Median_Income,Median_HomeValue,Commute_Time,Median_Age', help='Comma-separated demographic variables to classify')
-    return parser.parse_args()
 
+def main(args):
 
-def main():
-    args = parse_args()
+    results_csv = os.path.join(args.models_dir, f'interpolation_classification_{args.n_quantiles}quantiles.csv')
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     seed_everything(args.seed)
@@ -187,7 +170,7 @@ def main():
 
                     for trial in range(num_trials):
                         seed_everything(trial)
-                        labels = graph_data.y
+                        labels = graph_data.test_y
                         train_idx = []
                         val_idx = []
                         test_idx = []
@@ -223,19 +206,26 @@ def main():
                         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
                         best_loss = float('inf')
                         count = 0
+                        
+
+                        train_buss = torch.isin(graph_data.entity_ids, train_idx.to(device))
+                        train_y = graph_data.y[train_buss]
+                        val_buss = torch.isin(graph_data.entity_ids, val_idx.to(device))
+                        val_y = graph_data.y[val_buss]
 
                         model.train()
                         for epoch in (range(1, args.epochs + 1)):
                             model.train()
                             optimizer.zero_grad()
-                            out = model(graph_data.x, graph_data.edge_index, bg_subgraph=graph_data.entity_ids)
-                            loss = criterion(out[train_idx], graph_data.y[train_idx])
+                            out = model(graph_data.x, graph_data.edge_index)
+
+                            loss = criterion(out[train_buss], train_y)
                             loss.backward()
                             optimizer.step()
 
                             model.eval()
-                            out = model(graph_data.x, graph_data.edge_index, bg_subgraph=graph_data.entity_ids)
-                            val_loss = criterion(out[val_idx], graph_data.y[val_idx])
+                            out = model(graph_data.x, graph_data.edge_index)
+                            val_loss = criterion(out[val_buss], val_y)
                             if val_loss < best_loss:
                                 best_loss = val_loss
                                 best_model = model.state_dict()
@@ -249,11 +239,13 @@ def main():
                         model.eval()
 
 
-                        pred_y = model(graph_data.x, graph_data.edge_index, bg_subgraph=graph_data.entity_ids).softmax(dim=1).cpu().detach().numpy()
+                        pred_y = model(graph_data.x, graph_data.edge_index, graph_data.entity_ids).softmax(dim=1).cpu().detach().numpy()
                         discrete_pred_y = pred_y.argmax(axis=1)
-                        train_y = graph_data.y[train_idx].cpu().detach().numpy()
-                        val_y = graph_data.y[val_idx].cpu().detach().numpy()
-                        test_y = graph_data.y[test_idx].cpu().detach().numpy()
+                        if args.n_quantiles == 2:
+                            pred_y = pred_y[:, 1]
+                        train_y = graph_data.test_y[train_idx].cpu().detach().numpy()
+                        val_y = graph_data.test_y[val_idx].cpu().detach().numpy()
+                        test_y = graph_data.test_y[test_idx].cpu().detach().numpy()
 
 
                         test_f1 = f1_score(test_y, discrete_pred_y[test_idx].astype(int), average='micro')
@@ -287,8 +279,26 @@ def main():
 
                     total_results_df = pd.DataFrame(total_results)
 
-                    total_results_df.to_csv(args.results_csv)
+                    total_results_df.to_csv(results_csv)
 
 
 if __name__ == "__main__":
-    main()
+
+    parser = argparse.ArgumentParser(description="Interpolation classification over spatial graph with macroentity aggregation")
+    parser.add_argument("--n_quantiles", type=int, default=5)
+    parser.add_argument('--urban_areas', type=str, default='Philadelphia,St. Louis,Indianapolis,Nashville,Tampa', help='Comma-separated urban areas to include')
+    parser.add_argument('--macroentities', type=str, default='bg,tract,zip', help='Comma-separated target entities (bg, tract, zip)')
+    parser.add_argument('--business_csv_path', type=str, default='../datasets/yelp2019_business.csv', help='Path to businesses CSV')
+    parser.add_argument('--models_dir', type=str, default='../results/yelp2019/', help='Directory containing precomputed business embeddings (*.npy)')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--epochs', type=int, default=5000, help='Max training epochs')
+    parser.add_argument('--patience', type=int, default=100, help='Early stopping patience')
+    parser.add_argument('--k', type=int, default=10, help='k for kNN spatial graph')
+    parser.add_argument('--hidden_channels', type=int, default=64, help='Hidden channels for GNN')
+    parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=5e-4, help='Weight decay')
+    parser.add_argument('--dem_vars', type=str, default='Median_Income,Median_HomeValue,Commute_Time,Median_Age', help='Comma-separated demographic variables to classify')
+
+    args = parser.parse_args()
+
+    main(args)
