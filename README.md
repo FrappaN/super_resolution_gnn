@@ -1,6 +1,6 @@
 # super_resolution_gnn
 
-Code repository for the submission of "Super-Resolution of Urban Socioeconomic Indicators via Graph-Based Recommender Systems" at the Web Applications and Smart Cities Workshop at WWW 2026. 
+Code repository for the submission of "Super-Resolution of Urban Socioeconomic Indicators via Graph-Based Recommender Systems". 
 
 The code requirements are in the requirements.txt file. 
 
